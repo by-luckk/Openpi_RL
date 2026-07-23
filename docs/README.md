@@ -38,7 +38,7 @@
 | [`network-proxy-curl.md`](network-proxy-curl.md) | 当前 VPN/Clash 代理与 curl 行为检查：`curl` 已使用 `127.0.0.1:7897`，代理访问成功，直连对照超时 |
 | [`codex-cli-update.md`](codex-cli-update.md) | Codex CLI 官方安装脚本与 `codex update` 检查：确认代理下载可用，并已从 0.142.4 更新到 0.142.5 |
 | [`worktree-cleanup-20260720.md`](worktree-cleanup-20260720.md) | 工作树改动审计：已删除的临时残片、保留的核心链路与实验工具分类 |
-| [`github-fork-push-20260723.md`](github-fork-push-20260723.md) | GitHub fork/push 检查：SSH 已认证为 `by-luckk`，目标 fork 尚不存在，API 设备授权待完成 |
+| [`github-fork-push-20260723.md`](github-fork-push-20260723.md) | GitHub fork/push：已创建 `by-luckk/Openpi_RL`，通过 SSH 推送 `master` 并验证远端 commit |
 
 ## 怎么新增记录
 

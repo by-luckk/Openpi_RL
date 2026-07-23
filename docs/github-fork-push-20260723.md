@@ -1,6 +1,6 @@
 # GitHub fork 与 push 检查（2026-07-23）
 
-检查时间：2026-07-23 14:49-16:59 CST
+检查时间：2026-07-23 14:49-17:07 CST
 
 检查人：Codex
 
@@ -15,9 +15,13 @@ git remote -v
 ssh -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -T git@github.com
 git ls-remote git@github.com:by-luckk/Openpi_RL.git HEAD
 curl -sS -o /dev/null -w '%{http_code}' https://github.com/by-luckk/Openpi_RL
+gh repo fork Robot-K/Openpi_RL --clone=false
+git remote add fork git@github.com:by-luckk/Openpi_RL.git
+git push -u fork master
+git ls-remote fork refs/heads/master
 ```
 
-结果：
+首次检查结果：
 
 - `origin` 为 `https://github.com/Robot-K/Openpi_RL.git`。
 - 首次 SSH 因本机缺少 `github.com` host key 被拒；使用 OpenSSH `accept-new` 写入 host key 后，
@@ -29,8 +33,20 @@ curl -sS -o /dev/null -w '%{http_code}' https://github.com/by-luckk/Openpi_RL
   push 已存在仓库，不能创建 GitHub fork，因此创建 fork 还需要 GitHub API/OAuth 授权。
 
 临时从 GitHub CLI 官方 release 下载 `gh 2.96.0` 到 `/tmp`，并用官方 checksums 文件验证
-SHA-256 后启动 GitHub device login。设备授权在等待期间未由 GitHub 确认，随后已停止后台登录
-进程；未创建 fork，也未 push。临时 CLI 没有安装到系统目录。
+SHA-256 后启动 GitHub device login。首次 device code 过期后停止旧进程；第二次 device login
+由用户在 GitHub 页面确认，CLI 返回 `Logged in as by-luckk`，权限包含 `repo`。
+
+授权后 `gh repo fork` 成功创建 `https://github.com/by-luckk/Openpi_RL`。GitHub API 复核结果为
+`isFork=true`，parent 为 `Robot-K/Openpi_RL`，默认分支为 `master`。本地新增 SSH remote：
+
+```text
+fork  git@github.com:by-luckk/Openpi_RL.git
+```
+
+`git push -u fork master` 成功把 `master` 从上游基线 `87b5ac9` 推到功能提交 `593fb0d`，并设置
+本地 `master` 跟踪 `fork/master`。随后 `git rev-parse HEAD` 与
+`git ls-remote fork refs/heads/master` 均返回
+`593fb0dca712d18c9bb635acc57192f98d7fd427`。
 
 ## 本地提交身份
 
@@ -43,8 +59,7 @@ git commit --amend --no-edit --reset-author
 
 提交作者和提交者均已变为 `by-luckk <by-chen22@mails.tsinghua.edu.cn>`。
 
-## 结论与后续
+## 结论
 
-SSH push 前置条件已满足，但 fork 创建被 GitHub API 授权阻塞。用户完成一次 GitHub CLI device
-authorization，或在网页手动点击 Fork 创建 `by-luckk/Openpi_RL` 后，即可把 fork 添加为 SSH
-remote 并推送本地 `master`。当前未向 `Robot-K/Openpi_RL` 写入任何内容。
+fork 创建和 SSH push 均已完成：`by-luckk/Openpi_RL:master` 包含当前功能提交，本地分支已跟踪
+`fork/master`。`origin` 仍指向 `Robot-K/Openpi_RL`，本轮未向上游仓库写入任何内容。

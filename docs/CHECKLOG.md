@@ -4578,3 +4578,14 @@ shell 语法、三角波 dry-run、三个 `--help`、删除引用检查和 `git 
 identity 和未推送 commit 作者/提交者改为 `by-luckk <by-chen22@mails.tsinghua.edu.cn>`。未向上游
 仓库写入内容，未输出或落盘设备验证码。详见
 [github-fork-push-20260723.md](github-fork-push-20260723.md)。
+
+## 2026-07-23 17:07 CST - 创建个人 fork 并通过 SSH push（agent: Codex）
+
+用户完成第二次 GitHub device authorization 后，临时官方 `gh 2.96.0` 登录为 `by-luckk`，并成功
+创建 `https://github.com/by-luckk/Openpi_RL`。GitHub API 确认该仓库 `isFork=true`、parent 为
+`Robot-K/Openpi_RL`、默认分支为 `master`。本地新增
+`fork=git@github.com:by-luckk/Openpi_RL.git`，`git push -u fork master` 成功将远端从
+`87b5ac9` 更新到 `593fb0d`；本地 HEAD 与远端 `refs/heads/master` 均为
+`593fb0dca712d18c9bb635acc57192f98d7fd427`，本地 `master` 已跟踪 `fork/master`。`origin` 保持
+指向 `Robot-K/Openpi_RL`，未向上游写入。详见
+[github-fork-push-20260723.md](github-fork-push-20260723.md)。

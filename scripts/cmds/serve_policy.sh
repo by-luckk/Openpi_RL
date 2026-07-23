@@ -4,8 +4,8 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
-POLICY_CONFIG=pi06_rl_pretrain_airbot_clothes_folding
-CHECKPOINT_DIR=checkpoints/pi06_rl_pretrain_airbot_clothes_folding/policy_iter0/XXXXX
+POLICY_CONFIG=pi05_vio_plant_collection_535_clean_wrist_only
+CHECKPOINT_DIR=checkpoints/pi05_vio_plant_collection_535_clean_wrist_only/vio_pi05_535_clean_wrist_only_80k_260717/79999
 PORT=8000
 TMP_ROOT=./.tmp/serve_policy
 # ───────────────────────────────────────────────────────────────────────────────

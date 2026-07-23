@@ -6,13 +6,13 @@ import dataclasses
 import difflib
 import logging
 import pathlib
-from typing import Any, Literal, Protocol, TypeAlias
+from typing import Any, Protocol, TypeAlias
 
 import etils.epath as epath
 import flax.nnx as nnx
+import torch
 from typing_extensions import override
 import tyro
-import torch
 
 # models
 import openpi.models.model as _model
@@ -26,7 +26,6 @@ import openpi.policies.airbot_policy as airbot_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
-
 import openpi.training.optimizer as _optimizer
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
@@ -258,6 +257,11 @@ class SimpleDataConfig(DataConfigFactory):
 @dataclasses.dataclass(frozen=True)
 class LeRobotAirbotDataConfig(DataConfigFactory):
     extra_delta_transform: bool = False
+    # Camera streams that contain real pixels. Missing model camera slots are
+    # filled with zeros and mask=False by AirbotInputs.
+    image_keys: tuple[str, ...] = _model.IMAGE_KEYS
+    # Existing PI0.6/RL configs consume this label; plain PI0.5 SFT does not.
+    include_advantage: bool = True
     # When True, randomly applies a spatial left-right symmetry augmentation
     # during training (50% probability per sample).  Never applied at inference.
     enable_symmetry_aug: bool = False
@@ -267,20 +271,21 @@ class LeRobotAirbotDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        repack_inputs = [
-            _transforms.RepackTransform(
-                {
-                    "base_0_rgb": "base_0_rgb",
-                    "left_wrist_0_rgb": "left_wrist_0_rgb",
-                    "right_wrist_0_rgb": "right_wrist_0_rgb",
-                    "state": "state",
-                    "actions": "actions",
-                    "prompt": "prompt",
-                    "advantage": "is_good_action",
-                    "intervention": "intervention",
-                }
-            )
-        ]
+        unknown_image_keys = set(self.image_keys) - set(_model.IMAGE_KEYS)
+        if unknown_image_keys:
+            raise ValueError(f"Unknown Airbot image keys: {sorted(unknown_image_keys)}")
+        if not self.image_keys:
+            raise ValueError("LeRobotAirbotDataConfig requires at least one camera image.")
+        mapping = {
+            "state": "state",
+            "actions": "actions",
+            "prompt": "prompt",
+            "intervention": "intervention",
+        }
+        mapping = {name: name for name in self.image_keys} | mapping
+        if self.include_advantage:
+            mapping["advantage"] = "is_good_action"
+        repack_inputs = [_transforms.RepackTransform(mapping)]
         if self.enable_symmetry_aug:
             repack_inputs.append(airbot_policy.AirbotSymmetryAugmentation(prob=0.5))
         if self.enable_channel_permutation_aug:
@@ -289,7 +294,12 @@ class LeRobotAirbotDataConfig(DataConfigFactory):
         repack_transform = _transforms.Group(inputs=repack_inputs)
 
         data_transforms = _transforms.Group(
-            inputs=[airbot_policy.AirbotInputs(action_dim=model_config.action_dim)],
+            inputs=[
+                airbot_policy.AirbotInputs(
+                    action_dim=model_config.action_dim,
+                    image_keys=self.image_keys,
+                )
+            ],
             outputs=[airbot_policy.AirbotOutputs()],
         )
 
@@ -574,6 +584,45 @@ _CONFIGS = [
         keep_period=4000,
         wandb_enabled=True,
     ),
+    TrainConfig(
+        name="pi06_rl_vf_vio_plant_collection",
+        model=value_function.ValueFunctionConfig(
+            model_type=_model.ModelType.VALUE_FUNCTION,
+            gemma_variant="gemma_270m",
+            discrete_state_input=True,
+            num_bins=200,
+            return_min=0.0,
+            return_max=1.0,
+            action_horizon=1,
+            action_dim=14,
+        ),
+        data=LeRobotAirbotVFDataConfig(
+            repo_id="vio_plant_collection_30hz_relpose",
+            base_config=DataConfig(prompt_from_task=True, action_sequence_keys=()),
+            enable_symmetry_aug=False,
+            enable_channel_permutation_aug=False,
+        ),
+        batch_size=48 * torch.cuda.device_count(),
+        num_workers=6 * torch.cuda.device_count(),
+        seed=42,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-4,
+            decay_steps=40_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.ValueFunctionWeightLoader(
+            gemma3_dir="/data/cache/huggingface/hub/models--unsloth--gemma-3-270m/snapshots/edcf1fe394ee1168e7c5538afd104cfb1f7947e6",
+            load_siglip=True,
+        ),
+        ema_decay=None,
+        num_train_steps=40_000,
+        log_interval=100,
+        save_interval=2000,
+        keep_period=4000,
+        wandb_enabled=False,
+    ),
     #
     # Fine-tuning Airbot configs.
     #
@@ -615,6 +664,40 @@ _CONFIGS = [
         wandb_enabled=True,
         fsdp_devices=2,
     ),
+    TrainConfig(
+        name="pi06_rl_pretrain_vio_plant_collection",
+        model=pi0_config.Pi0Config(
+            model_type=_model.ModelType.PI06,
+            action_horizon=50,
+            action_dim=32,
+            discrete_state_input=True,
+        ),
+        data=LeRobotAirbotDataConfig(
+            repo_id="vio_plant_collection_30hz_relpose",
+            base_config=DataConfig(prompt_from_task=True, action_sequence_keys=()),
+            extra_delta_transform=False,
+            enable_symmetry_aug=False,
+            enable_channel_permutation_aug=False,
+        ),
+        batch_size=8 * torch.cuda.device_count(),
+        num_workers=6 * torch.cuda.device_count(),
+        seed=42,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=300_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        ema_decay=0.99,
+        num_train_steps=300_000,
+        log_interval=50,
+        save_interval=20000,
+        keep_period=2000,
+        wandb_enabled=False,
+        fsdp_devices=2,
+    ),
     #
     # pi05 full finetune on Airbot clothes folding. Pure pi05 model (no advantage conditioning).
     # action_dim=32 / action_horizon=50 to match pi05_base pretrained checkpoint dims.
@@ -646,6 +729,81 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         ema_decay=0.999,
         num_train_steps=300_000,
+        log_interval=50,
+        save_interval=20000,
+        keep_period=4000,
+        wandb_enabled=True,
+        fsdp_devices=2,
+    ),
+    TrainConfig(
+        name="pi05_vio_plant_collection",
+        model=pi0_config.Pi0Config(
+            model_type=_model.ModelType.PI05,
+            action_horizon=50,
+            action_dim=32,
+            discrete_state_input=False,
+        ),
+        data=LeRobotAirbotDataConfig(
+            repo_id="vio_plant_collection_30hz_relpose",
+            base_config=DataConfig(prompt_from_task=True, action_sequence_keys=()),
+            extra_delta_transform=False,
+            enable_symmetry_aug=False,
+            enable_channel_permutation_aug=False,
+        ),
+        batch_size=6 * torch.cuda.device_count(),
+        num_workers=6 * torch.cuda.device_count(),
+        seed=42,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=300_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        ema_decay=0.999,
+        num_train_steps=300_000,
+        log_interval=50,
+        save_interval=20000,
+        keep_period=4000,
+        wandb_enabled=False,
+        fsdp_devices=2,
+    ),
+    # PI0.5 SFT on clean VIO data using only the two wrist cameras.
+    TrainConfig(
+        name="pi05_vio_plant_collection_535_clean_wrist_only",
+        model=pi0_config.Pi0Config(
+            model_type=_model.ModelType.PI05,
+            action_horizon=50,
+            action_dim=32,
+            discrete_state_input=False,
+        ),
+        data=LeRobotAirbotDataConfig(
+            repo_id="vio_plant_collection_30hz_relpose_535_clean",
+            assets=AssetsConfig(
+                assets_dir="assets/pi05_vio_plant_collection_535_clean",
+                asset_id="vio_plant_collection_30hz_relpose_535_clean",
+            ),
+            base_config=DataConfig(prompt_from_task=True, action_sequence_keys=()),
+            extra_delta_transform=False,
+            image_keys=("left_wrist_0_rgb", "right_wrist_0_rgb"),
+            include_advantage=False,
+            enable_symmetry_aug=False,
+            enable_channel_permutation_aug=False,
+        ),
+        batch_size=6 * torch.cuda.device_count(),
+        num_workers=6 * torch.cuda.device_count(),
+        seed=42,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=80_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        ema_decay=0.999,
+        num_train_steps=80_000,
         log_interval=50,
         save_interval=20000,
         keep_period=4000,

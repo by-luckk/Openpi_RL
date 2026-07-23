@@ -6,7 +6,6 @@ import numpy as np
 from openpi import transforms
 from openpi.models import model as _model
 
-
 # Per-arm sign mask for spatial left-right symmetry:
 # Joints 1, 4, 5, 6 (1-indexed) are negated; joints 2, 3 and gripper (7) are unchanged.
 _AIRBOT_ARM_JOINT_SIGN = np.array([-1.0, 1.0, 1.0, -1.0, -1.0, -1.0, 1.0], dtype=np.float64)
@@ -132,21 +131,34 @@ def _parse_image(image) -> np.ndarray:
 class AirbotInputs(transforms.DataTransformFn):
     action_dim: int = 32
     num_bins: int = 201
+    image_keys: tuple[str, ...] = _model.IMAGE_KEYS
 
     def __call__(self, data: dict) -> dict:
 
         state = transforms.pad_to_dim(data["state"], self.action_dim)
 
+        unknown_image_keys = set(self.image_keys) - set(_model.IMAGE_KEYS)
+        if unknown_image_keys:
+            raise ValueError(f"Unknown Airbot image keys: {sorted(unknown_image_keys)}")
+        if not self.image_keys:
+            raise ValueError("AirbotInputs requires at least one real camera image.")
+
+        parsed_images = {}
+        for name in self.image_keys:
+            if name not in data:
+                raise KeyError(f"Missing configured Airbot image: {name}")
+            parsed_images[name] = _parse_image(data[name])
+        reference_image = next(iter(parsed_images.values()))
+
         image_dict = {}
         image_mask_dict = {}
-        image_name = ["base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb"]
-        for name in image_name:
-            if name in data:
-                img = _parse_image(data[name])
-                # No need for transformation
-                # img = img[..., ::-1]  # BGR -> RGB
-                image_dict[name] = img
+        for name in _model.IMAGE_KEYS:
+            if name in parsed_images:
+                image_dict[name] = parsed_images[name]
                 image_mask_dict[name] = np.True_
+            else:
+                image_dict[name] = np.zeros_like(reference_image)
+                image_mask_dict[name] = np.False_
 
         # # debug
         # import uuid
@@ -155,7 +167,7 @@ class AirbotInputs(transforms.DataTransformFn):
         # debug_dir = "./debug"
         # os.makedirs(debug_dir, exist_ok=True)
         # uid = uuid.uuid4().hex[:8]
-        # for name in image_name:
+        # for name in _model.IMAGE_KEYS:
         #     Image.fromarray(image_dict[name]).save(
         #         f"{debug_dir}/{name}_{uid}.jpg",
         #         quality=95
@@ -190,7 +202,6 @@ class AirbotOutputs(transforms.DataTransformFn):
     def __call__(self, data: dict) -> dict:
         if "actions" in data:
             return {"actions": np.asarray(data["actions"])}
-        elif "binned_value" in data:
+        if "binned_value" in data:
             return {"binned_value": np.asarray(data["binned_value"], dtype=np.int32)}
-        else:
-            raise ValueError("AirbotOutputs expects either 'actions' or 'binned_value' in the input data.")
+        raise ValueError("AirbotOutputs expects either 'actions' or 'binned_value' in the input data.")

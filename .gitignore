@@ -60,6 +60,17 @@ wandb/
 *.zip
 *.tar.gz
 *.7z
+*.deb
+*.whl
+
+# 依赖与补丁残留
+node_modules/
+*.orig
+*.rej
+
+# 本地解压的外部仓库和 vendor 发布包（不是本仓库源码）
+docs/VIO_Test/VIO_Test/
+docs/AIRBOT-ARM-P7-SW-2026-06-23-21-16-24/
 
 # 临时文件
 tmp/

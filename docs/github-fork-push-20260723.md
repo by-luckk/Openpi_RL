@@ -63,3 +63,9 @@ git commit --amend --no-edit --reset-author
 
 fork 创建和 SSH push 均已完成：`by-luckk/Openpi_RL:master` 包含当前功能提交，本地分支已跟踪
 `fork/master`。`origin` 仍指向 `Robot-K/Openpi_RL`，本轮未向上游仓库写入任何内容。
+
+完成 API 操作后已执行 `gh auth logout --hostname github.com --user by-luckk`，确认本机
+`~/.config/gh/hosts.yml` 不再包含 `oauth_token` 或用户条目；临时 GitHub CLI 和设备登录日志已移入
+系统回收站。SSH remote 随后仍能正常读取远端 `master`。`gh auth logout` 只删除本地凭据，不会
+自动撤销 GitHub 侧 OAuth 授权；如需撤销，应在 GitHub Settings -> Applications 中管理
+`GitHub CLI` 授权，注意撤销该应用会影响同账号其他 GitHub CLI 登录。

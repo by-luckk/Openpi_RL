@@ -4579,6 +4579,14 @@ identity 和未推送 commit 作者/提交者改为 `by-luckk <by-chen22@mails.t
 仓库写入内容，未输出或落盘设备验证码。详见
 [github-fork-push-20260723.md](github-fork-push-20260723.md)。
 
+## 2026-07-23 17:12 CST - 清理临时 GitHub API 凭据与 CLI（agent: Codex）
+
+fork 和 push 完成后执行 `gh auth logout --hostname github.com --user by-luckk`，确认本机 gh 配置
+不再含 `oauth_token` 或用户条目；临时下载的 GitHub CLI 目录和 device login 日志已移入系统回收
+站，未发现残留登录进程。SSH `git ls-remote fork refs/heads/master` 仍成功返回
+`9a92ffa040f8474a8c0bad8d0a7a1f33dbdecced`。本地 logout 不会自动撤销 GitHub 侧 OAuth 应用授权；
+如需撤销可在 GitHub Settings -> Applications 管理，但会影响同账号其他 GitHub CLI 登录。
+
 ## 2026-07-23 17:07 CST - 创建个人 fork 并通过 SSH push（agent: Codex）
 
 用户完成第二次 GitHub device authorization 后，临时官方 `gh 2.96.0` 登录为 `by-luckk`，并成功

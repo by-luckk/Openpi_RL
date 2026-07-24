@@ -353,3 +353,172 @@ checkpoint 的常规执行主线是 `get_end_pose()` + `move_end_pose()`。`play
 
 文档写入后执行 `git diff --check -- docs/p7-sdk-grpc-current-state.md docs/CHECKLOG.md`，退出码为
 `0`，未发现空白符错误。
+
+## 2026-07-24 22:18 CST - 读取当前双臂关节 pose 失败（agent: Codex）
+
+目的：按用户请求快速记录当前左右臂 joint pose，仅调用 SDK 读取接口。
+
+```bash
+timeout 12 .venv-p7-ros/bin/python - <<'PY'
+from arm_p7_sdk import AirbotClient
+for side, port in (("left", 50071), ("right", 50072)):
+    client = AirbotClient(host="192.168.25.1", port=port, backend="grpc")
+    try:
+        print(side, client.get_service_state())
+        print(side, client.get_arm_joint_state())
+    finally:
+        client.close()
+PY
+```
+
+结果：在创建左臂 `AirbotClient(192.168.25.1:50071)` 时，SDK 内部
+`grpc.channel_ready_future(...).result(timeout=3.0)` 超时，报
+`ConnectionError: Timeout connecting to 192.168.25.1:50071`；右臂尚未尝试，故本次没有可记录的
+joint pose。未申请控制权、未切控制器、未发送运动或夹爪命令。
+
+## 8. 2026-07-24 13:29 CST - TCP 端口监听但 gRPC handshake 超时（agent: Codex）
+
+目的：定位 VIO 双臂 replay 在创建第一个 `AirbotClient` 时报告
+`Timeout connecting to 192.168.25.1:50071` 的原因。
+
+检查命令：
+
+```bash
+nc -vz -w 3 192.168.25.1 50071
+nc -vz -w 3 192.168.25.1 50072
+
+ssh -o BatchMode=yes root@192.168.25.1 \
+  "pgrep -af 'arm_app|arm_dual_app|robot_app'; ss -lntp | grep -E '50071|50072'"
+
+.venv-p7-ros/bin/python -c "from arm_p7_sdk import AirbotClient; \
+c=AirbotClient(host='192.168.25.1', port=50071, backend='grpc'); \
+print(c.get_service_state()); c.close()"
+
+.venv-p7-sdk/bin/python -c "from arm_p7_sdk import AirbotClient; \
+c=AirbotClient(host='192.168.25.1', port=50071, backend='grpc'); \
+print(c.get_service_state()); c.close()"
+```
+
+结果：TCP 探测对 `50071/50072` 均成功；X5 有两个 `/opt/arm_app` 实例（left PID `5390`、right PID
+`5391`）和一个 `robot_app`，两个端口均由相应 `arm_app` LISTEN。可是 `.venv-p7-ros` 的
+`arm_p7_sdk 1.1.2 / grpcio 1.82.1` 与 `.venv-p7-sdk` 的 `arm_p7_sdk 1.1.2 / grpcio 1.81.1` 都在
+SDK 内部 `grpc.channel_ready_future(...).result(timeout=3.0)` 超时；并非 Python 版本或单一客户端环境
+的问题。板端日志虽含 `gRPC server listening on 0.0.0.0:50071/50072`，但客户端无法完成 HTTP/2/gRPC
+readiness handshake。
+
+**已修正结论（2026-07-24 14:50）**：上面的 probe 没有复用 replay 的直连前置处理，继承了本机
+`http_proxy/https_proxy/all_proxy=127.0.0.1:7897`。后续用 replay 同样的代理清理方式验证，左右
+`get_service_state()` 都立即返回 `IDLE/idle/valid`。因此本节的 gRPC timeout 根因是本机代理环境，
+不是仅凭这次检查就能断言的 X5 route 不健康。
+
+## 9. 2026-07-24 14:34 CST - 键盘遥操作启动时复核 gRPC 超时与进程占用（agent: Codex）
+
+**目的**：确认 `keyboard_dual_arm_teleop.sh --execute --allow-robot-motion` 报
+`Timeout connecting to 192.168.25.1:50071` 是否由其他控制程序占用造成。
+
+**检查命令**：
+
+```bash
+ss -ltnp '( sport = :50071 or sport = :50072 )'
+pgrep -af 'keyboard_dual_arm_teleop|openpi_p7_persistent_loop|p7_replay|airbot_inference'
+nc -vz -w 3 192.168.25.1 50071
+nc -vz -w 3 192.168.25.1 50072
+
+ssh -o BatchMode=yes root@192.168.25.1 \
+  "ss -ltnp | grep -E ':50071|:50072'; ps -o pid,ppid,stat,etime,%cpu,%mem,args -p 2184,2185,2535"
+
+.venv-p7-sdk/bin/python -c "from arm_p7_sdk import AirbotClient; \
+c=AirbotClient(host='192.168.25.1', port=50071, backend='grpc'); \
+print(c.get_service_state()); c.close()"
+```
+
+**结果**：
+
+- 本机没有监听 `50071/50072`，也没有 `keyboard_dual_arm_teleop`、persistent loop、replay 或推理
+  控制进程在运行；因此不是本机端口冲突或遗留控制客户端。
+- TCP 探测可连通两个端口；X5 上 `50071` 属于 left `arm_app`（PID `2185`），`50072` 属于 right
+  `arm_app`（PID `2184`）。两个 arm_app 和 remote robot_app 均在运行。
+- 但是只读 SDK probe 仍在 `grpc.channel_ready_future(..., timeout=3.0)` 超时，未能创建 client。
+  这发生在 `acquire_control()` 之前，不能由其他客户端持有的 control lease 导致。
+- 当时 right/left `arm_app` CPU 分别约 `44.1%/46.9%`，remote `robot_app` 约 `34.7%`，日志有 CAN、FK
+  和周期超时警告；这些值得单独关注，但不构成这次 SDK handshake timeout 的根因。
+
+**修正结论与影响**：不存在本机端口或 control lease 占用。键盘脚本需要像 replay 一样，在创建
+`AirbotClient` 前移除代理变量并将机器人 IP 加入 `NO_PROXY`；不能因为本次 proxy-induced timeout 而重启
+X5 runtime。
+
+## 10. 2026-07-24 14:38 CST - 排除键盘脚本 Python 环境差异
+
+**目的**：用户反馈 VIO replay 使用 `.venv-p7-ros` 可以运行，核对键盘封装默认使用的
+`.venv-p7-sdk` 是否是 gRPC timeout 的原因。
+
+**命令**：
+
+```bash
+.venv-p7-ros/bin/python -c "import arm_p7_sdk, grpc; print(arm_p7_sdk.__version__, grpc.__version__)"
+.venv-p7-sdk/bin/python -c "import arm_p7_sdk, grpc; print(arm_p7_sdk.__version__, grpc.__version__)"
+
+.venv-p7-ros/bin/python -c "from arm_p7_sdk import AirbotClient; \
+c=AirbotClient(host='192.168.25.1', port=50071, backend='grpc'); print(c.get_service_state())"
+.venv-p7-sdk/bin/python -c "from arm_p7_sdk import AirbotClient; \
+c=AirbotClient(host='192.168.25.1', port=50071, backend='grpc'); print(c.get_service_state())"
+```
+
+**结果**：`p7-ros` 为 Python `3.12.3`、`arm_p7_sdk 1.1.2`、`grpcio 1.82.1`；`p7-sdk` 为 Python
+`3.11.15`、`arm_p7_sdk 1.1.2`、`grpcio 1.81.1`。直接运行时两环境都继承了本机的
+`http_proxy/https_proxy/all_proxy`，因而都在 `grpc.channel_ready_future(..., timeout=3.0)` 失败。
+`p7_replay_vio_dual_arm_trajectory.py:414-423` 则会在建连前清除这些变量并追加 `NO_PROXY`。
+
+**修正结论**：Python 环境不是 timeout 的根因；决定性差异是 replay 的 `configure_direct_grpc()`。
+以下命令按该方式运行后，当场成功返回左右 `IDLE/idle/valid`：
+
+```bash
+env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+  .venv-p7-ros/bin/python -c "from arm_p7_sdk import AirbotClient; \
+c=AirbotClient(host='192.168.25.1', port=50071, backend='grpc'); print(c.get_service_state()); c.close()"
+```
+
+## 11. 2026-07-24 14:50 CST - replay 与键盘连接方式对齐：绕过本机代理
+
+用户指出 replay 每次可立即控制，而键盘脚本重试也无法建连。对照源码确认 replay 的决定性步骤是：
+
+```python
+removed_proxy_variables = configure_direct_grpc(args.host)
+clients = {
+    "left": AirbotClient(host=args.host, port=args.left_port, backend=args.backend),
+    "right": AirbotClient(host=args.host, port=args.right_port, backend=args.backend),
+}
+```
+
+本机环境有 `all_proxy=socks5://127.0.0.1:7897`、`http_proxy=https_proxy=http://127.0.0.1:7897`；SDK gRPC
+建连若继承它们会超时。键盘脚本现已复用相同的 `configure_direct_grpc()`，在建连前移除六个大小写代理变量、
+为 `no_proxy/NO_PROXY` 追加 `192.168.25.1`，并把 shell 默认 Python 改为 replay 使用的
+`.venv-p7-ros/bin/python`。此前加入的建连重试已删除，因为它不能修复代理路由错误。随后以 keyboard
+shell 的默认 dry-run 启动并延迟输入 `q`，实测其打印移除的代理变量、立即读到左右 `IDLE/idle/valid` 并正常退出；
+未申请 control lease 或发送动作。
+
+## 12. 2026-07-24 22:03 CST - 双臂当前 7 轴关节位置只读快照
+
+**命令**：使用 `.venv-p7-ros`，清除代理变量后分别连接 `50071/50072`，调用
+`get_service_state()` 和 `get_arm_joint_state()`；未调用 `acquire_control()`、`switch_controller()`、
+`move_*()` 或 `move_end_pose()`。
+
+**采样时间**：`2026-07-24T22:03:04.299587+08:00`。
+
+| 侧 | 服务状态 | 7 轴关节位置（rad） |
+|---|---|---|
+| left | `SERVO_CONTROL/csp/valid` | `[-0.0167, 0.7801, -0.0105, 0.0370, 0.0044, 0.0009, 1.0398]` |
+| right | `SERVO_CONTROL/csp/valid` | `[-0.0146, 0.7801, -0.0098, 0.0381, 0.0014, 0.0056, 1.0758]` |
+
+本次仅读取关节状态，未改变双臂当前 `SERVO_CONTROL/csp` 状态。
+
+## 13. 2026-07-24 22:34 CST - 抓图脚本建连超时与键盘脚本对比
+
+用户报告 `close_grippers_capture_wrist_images.py` 在 `50071` 建连超时，同时
+`keyboard_dual_arm_teleop.sh` 成功。只读对比源码确认：键盘脚本在创建
+`AirbotClient` 前调用 `configure_direct_grpc()`，抓图脚本原来没有调用，会继承本机
+`http_proxy/https_proxy/all_proxy` 并导致 gRPC readiness timeout。
+
+已在 `close_grippers_capture_wrist_images.py` 的 client 创建前复用同样的直连配置：移除六个大小写代理变量，并将
+`192.168.25.1` 加入 `NO_PROXY/no_proxy`。`.venv-p7-ros` 静态编译和 `git diff --check` 通过；未重跑真机、
+未申请 control lease、未发送夹爪命令。

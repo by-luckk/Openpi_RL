@@ -211,3 +211,21 @@ SDK 只读检查：左右均为 `IDLE/idle/valid`，双 EEF idle，关节速度�
 
 本轮未启动 OpenPI inference，未主动获取控制权或发送运动命令。最终本机无
 `openpi_p7_unlimited_recovery`、`openpi_p7_persistent_loop` 或 `p7_move_to_joint_target.py`。
+
+## 2026-07-23 20:37 CST - 双腕采图脚本因板端 runtime 未启动而阻断（agent: Codex）
+
+用户运行 `close_grippers_capture_wrist_images.py` 时，SDK 报
+`Timeout connecting to 192.168.25.1:50071`，但 ICMP ping 正常。只读复核命令：
+
+```bash
+timeout 5 bash -c 'cat < /dev/null > /dev/tcp/192.168.25.1/50071'
+timeout 5 bash -c 'cat < /dev/null > /dev/tcp/192.168.25.1/50072'
+ssh -o BatchMode=yes -o ConnectTimeout=5 root@192.168.25.1 \
+  'hostname; ps -eo pid,comm,args | grep -E "[a]rm_app|[r]obot_app|[a]rm_dual_app" || true; \
+   ss -lnt | grep -E ":(50071|50072)\\b" || true'
+```
+
+结果：SSH 正常进入主机 `ubuntu`；板端没有上述三个 runtime 进程，也没有 `50071/50072`
+监听；工作站 TCP 连接两端口均立即返回 `Connection refused`。这是板端服务未启动，不是网络
+不可达或采图脚本 topic 参数问题。脚本在第一个 SDK client 建连阶段退出，未调用
+`acquire_control()` / `move_eef()`，因此未闭合夹爪、未采图、未写入 `./data/`。

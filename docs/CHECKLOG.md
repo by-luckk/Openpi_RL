@@ -4597,3 +4597,251 @@ fork 和 push 完成后执行 `gh auth logout --hostname github.com --user by-lu
 `593fb0dca712d18c9bb635acc57192f98d7fd427`，本地 `master` 已跟踪 `fork/master`。`origin` 保持
 指向 `Robot-K/Openpi_RL`，未向上游写入。详见
 [github-fork-push-20260723.md](github-fork-push-20260723.md)。
+
+## 2026-07-23 19:58 CST - 核对双腕相机读取与保存入口（agent: Codex）
+
+执行 `rg -n -i "wrist|left_wrist|right_wrist|imwrite|VideoWriter|np.savez|McapDataSampler|save_video" examples/airbot scripts/cmds README.md`，并查看
+`record_openpi_cameras.py`、`capture_ros2_openpi_observation.py`、`inference_recorder.py`
+及同步/异步推理调用点。确认 `record_openpi_cameras.py --wrist-only` 订阅左右腕 ROS2
+topic，分别写出两个 MP4 和一个 tiled MP4；capture 脚本把左右单帧保存到 NPZ；启用
+`record_data` 的同步/异步推理则将 raw camera topics 编码到 MCAP（默认 H264）。推理配置
+默认 `record_data=false`，persistent loop 常规路径只在内存中传图，预览开关才写 NPZ。
+当前没有默认逐帧 PNG/JPG 保存入口。详见 [`camera-image-capture.md`](camera-image-capture.md)。
+另外确认录像脚本和单帧采集脚本的默认 topic 前缀不同（分别为 `/robot/camera/...` 和
+`/camera/.../image_rect`），不能不经核对直接混用参数。
+
+## 2026-07-23 20:12 CST - 新增闭合双夹爪后保存双腕图片脚本（agent: Codex）
+
+依据现有 `p7_move_to_joint_target.py`、`openpi_p7_persistent_loop.py` 和
+`capture_ros2_openpi_observation.py` 的接口实现，新增
+`examples/airbot/close_grippers_capture_wrist_images.py`。脚本顺序为：双臂服务状态检查 ->
+`acquire_control()` -> EEF CSP / speed -> 左右 `move_eef(pos=[close_mm] * eef_dof)` 并发闭合 ->
+切回 EEF idle、释放控制权 -> 等待左右 ROS2 新帧 -> OpenCV 保存两张 JPG/PNG 和 metadata JSON。
+默认 `close_mm=0`，默认 dry-run，真实动作要求 `--execute --allow-robot-motion`；脚本不移动机械臂。
+
+验证命令及结果：
+
+```bash
+python -m py_compile examples/airbot/close_grippers_capture_wrist_images.py
+.venv/bin/ruff check examples/airbot/close_grippers_capture_wrist_images.py
+.venv-p7-ros/bin/python examples/airbot/close_grippers_capture_wrist_images.py --help
+.venv-p7-ros/bin/python examples/airbot/close_grippers_capture_wrist_images.py
+git diff --check
+```
+
+结果：Ruff、编译、`--help`、dry-run 和 whitespace 检查均通过；dry-run 输出确认没有调用
+`acquire_control()` 或 `move_eef()`。本轮未连接机器人、未执行真实夹爪闭合、未采集现场图像。
+
+2026-07-23 20:13 CST 跟进修正客户端逐个登记的异常清理路径后，重新执行 Ruff、`py_compile`、`--help`、
+dry-run 和 `git diff --check`，全部通过；仍未连接机器人或执行真实动作。
+
+## 2026-07-23 20:15 CST - 增加左右腕图像 50/50 重叠输出（agent: Codex）
+
+在 `close_grippers_capture_wrist_images.py` 的两张单图保存成功后增加 `cv2.addWeighted` 混合：
+左右图各占 0.5 权重，输出 `<prefix>_wrist_overlay.jpg/png`，并把该路径写入 metadata；若两路
+分辨率不同，先将右图缩放到左图尺寸以保证完全重叠。`scripts/README.md` 的 4.4 节改为简化的
+一条运行命令和三个输出文件说明。
+
+验证命令：`.venv/bin/ruff check examples/airbot/close_grippers_capture_wrist_images.py`、
+`python -m py_compile examples/airbot/close_grippers_capture_wrist_images.py`、
+`.venv-p7-ros/bin/python examples/airbot/close_grippers_capture_wrist_images.py`、
+`git diff --check`；结果全部通过，dry-run 未调用机器人控制接口。本轮未连接机器人、未执行真实
+夹爪动作、未采集现场图像。
+
+## 2026-07-23 20:37 CST - 定位双腕采图脚本的 P7 SDK 建连超时（agent: Codex）
+
+用户的 ping 正常但脚本报 `Timeout connecting to 192.168.25.1:50071`。工作站只读 TCP 探测确认
+`50071/50072` 都返回 `Connection refused`；SSH 可正常进入 X5（hostname `ubuntu`），但板端无
+`arm_app`、`robot_app`、`arm_dual_app` 进程，两个 gRPC 端口均未监听。故障原因是板端 runtime
+未启动，而不是相机 topic 或主机网络不通。脚本未 acquire control、未发送 `move_eef()`、未采图
+或写入 `./data/`。详见 [`arm-app-vs-robot-app.md`](arm-app-vs-robot-app.md)。
+
+## 2026-07-23 21:15 CST - 定位闭合夹爪后双腕抓帧超时（agent: Codex）
+
+P7 控制 runtime 与 `50071/50072` 均在线，但显式使用 `ROS_DOMAIN_ID=0`、Fast DDS 重跑双腕抓帧
+仍得到两路 `missing`。现场 ROS graph 无腕部 `sensor_msgs/Image`，只有无实际帧的
+`CompressedVideo` 端点。板端 `robot_app` 日志确认左右腕四只相机均在 `tx_remote_init` 阶段以
+`ret=-2` 失败，汇总为 `2 started, 4 failed`，持续统计四腕路均为 `frames=0, fps=0.00`。配置中的
+腕部 `pub_image.enable=true`，故根因是板端腕部相机远端传感器/SerDes 初始化失败，不是脚本、QoS
+或 topic 拼写。详见 [`camera-image-capture.md`](camera-image-capture.md)。
+
+## 2026-07-23 21:28 CST - 临时生成上下翻转双腕重叠图（agent: Codex）
+
+未修改采图脚本和原始 JPG；用 OpenCV 将右腕图片上下翻转后，与左腕图片各按 50% 权重混合，
+生成 `/tmp/closed_wrist_right_vflip_left_overlay.jpg`。输出为 `640x480x3 uint8`，已视觉确认。
+ImageMagick `convert` 不存在的首次失败及实际 OpenCV 命令详见
+[`camera-image-capture.md`](camera-image-capture.md)。
+
+## 2026-07-24 13:14 CST - 新增 VIO 相对 TCP 双臂 replay 脚本（agent: Codex）
+
+检查 `vio_dual_arm_trajectory_10s.replay.npz` 确认它包含 273 个约 9.07 秒的 14D 相对 TCP 指令，
+不是关节角。新增 `p7_replay_vio_dual_arm_trajectory.py`：以 replay 开始时实际 TCP 为基座合成目标，
+将每段限制为 `10mm/0.10rad` 小步，默认 5 倍慢放、默认 5cm 包络拒绝、默认不重放夹爪，真实执行仍需
+`--execute --allow-robot-motion`。离线计划以 `--max-envelope-m 0.40` 成功生成 326 帧/45.333s，且
+确认没有 SDK client 或任何机器人命令；编译、Ruff、`--help`、pytest `2 passed` 和 diff 检查均通过。
+详见 [`vio-dual-arm-replay.md`](vio-dual-arm-replay.md)。
+
+## 2026-07-24 13:20 CST - 核对键盘控制双臂末端 XYZ/RPY（agent: Codex）
+
+全仓搜索确认：现有键盘监听只控制 episode/DAgger 状态；`airbot-driver` 的按键是遥操开关和回零；
+`play_operator.py` 发送关节目标；P7 replay 脚本虽能并发调用左右 `move_end_pose(CartesianPose)`，
+但没有键盘输入映射。因此当前没有“键盘直接控制双臂末端 XYZ + roll/pitch/yaw”的现成程序。
+未连接机器人、未发送运动命令。详见 [`keyboard-eef-control.md`](keyboard-eef-control.md)。
+
+## 2026-07-24 13:19 CST - VIO replay 夹爪值改为直接截断（agent: Codex）
+
+用户确认继续使用新增的独立 replay 脚本，且明确要求夹爪值截断到 `95mm`。因此
+`--replay-grippers` 改为将记录值直接按 P7 毫米值使用、限制到默认 `0..95mm`，不再将
+`0..102` 线性缩放为 `0..95`；右腕记录最大值 `101.913887` 会发送为 `95mm`。不修改
+`p7_continuous_servo_smoke.py` 或 `scripts/README.md`。夹爪模式 dry-run、编译、Ruff、`--help`、
+diff 检查均通过，轨迹数学和截断测试为 `3 passed`；未连接或控制机器人。
+
+## 2026-07-24 13:29 CST - 诊断 VIO replay 的 P7 gRPC 建连超时（agent: Codex）
+
+replay 在创建第一个 `AirbotClient(192.168.25.1:50071)` 时超时，尚未申请控制权或发送任何动作。
+X5 两个 `arm_app` 仍在、`50071/50072` TCP LISTEN 且 `nc` 连通，但 `.venv-p7-ros` 与
+`.venv-p7-sdk` 的 SDK 都在 `grpc.channel_ready_future(..., timeout=3.0)` 超时，确认端口仅能 TCP
+握手、gRPC route 未实际就绪。需恢复/重启左右 `arm_app` 并先通过只读 `get_service_state()` 探针验证。
+详见 [`p7-sdk-grpc-current-state.md`](p7-sdk-grpc-current-state.md)。
+
+## 2026-07-24 22:18 CST - 闭合夹爪抓图扩展为四路腕部立体 JPG（agent: Codex）
+
+`close_grippers_capture_wrist_images.py` 现内置 `192.168.25.1` 和左右腕各左右眼四路 raw image topic，
+保存四张不 resize 的单独 JPG，并保留 overlay/metadata；调用命令无需显式 host/topic。按用户要求未连接
+机器人或运行验证。详见 [`camera-image-capture.md`](camera-image-capture.md)。
+
+## 2026-07-24 13:35 CST - 新增键盘控制双臂六自由度末端程序（agent: Codex）
+
+新增 `examples/airbot/keyboard_dual_arm_teleop.py` 和 `scripts/cmds/keyboard_dual_arm_teleop.sh`：`1/2/b` 选择左/右/双臂，`w/s`、`a/d`、`r/f`
+控制 XYZ，`i/k`、`j/l`、`u/o` 控制 roll/pitch/yaw；默认 world frame，也可选 TCP local frame。
+程序默认 dry-run，实际运动要求 `--execute --allow-robot-motion`，并以初版 `2mm/2deg` 单步、`5cm/30deg`
+启动位姿包络、`80ms` 命令间隔作为保护；异常和退出会切 idle、释放控制权。Ruff、编译、`--help`、
+封装的 `--help`、`git diff --check` 通过，纯数学/按键映射 pytest 为 `3 passed`（禁用与本测试无关且缺依赖的全局 ROS 插件）。
+只传 `--execute` 已验证被拒绝；未连接或控制机器人。详见 [`keyboard-eef-control.md`](keyboard-eef-control.md)。
+
+## 2026-07-24 13:43 CST - 修正键盘遥操作 P7 最小臂速（agent: Codex）
+
+用户首次以真实运动开关启动后，左右初始均为 `IDLE/idle/valid`，左臂已获得 lease，但
+`set_arm_speed(0.25)` 被 SDK 拒绝：允许范围下限是 `0.5499000081647326 rad/s`。脚本的异常清理已
+成功让左臂 `switch_idle=True` 并释放 lease，未调用 `move_end_pose()`。已将 Python 和 shell 封装的
+初版默认臂速改为 `0.55 rad/s`。修正后传入 `P7_TELEOP_ARM_SPEED_RAD_S=0.25` 会在 SDK import、连接和
+lease 之前拒绝，输出允许范围 `[0.55, 7.85]`；Ruff、编译和 diff 检查通过。详见
+[`keyboard-eef-control.md`](keyboard-eef-control.md)。
+
+## 2026-07-24 22:03 CST - 记录双臂当前关节位置（agent: Codex）
+
+清除代理后使用 `.venv-p7-ros` 只读调用 `get_service_state()` / `get_arm_joint_state()`：left
+`[-0.0167, 0.7801, -0.0105, 0.0370, 0.0044, 0.0009, 1.0398]` rad，right
+`[-0.0146, 0.7801, -0.0098, 0.0381, 0.0014, 0.0056, 1.0758]` rad；两臂均为
+`SERVO_CONTROL/csp/valid`。未申请控制权、未切换模式、未发送动作。详见
+[`p7-sdk-grpc-current-state.md`](p7-sdk-grpc-current-state.md)。
+
+## 2026-07-24 22:38 CST - 抓图四路腕部 raw 话题全部无帧
+
+`close_grippers_capture_wrist_images.py` 已经过 gRPC 直连修正，但抓图报告四路
+`missing` 且 `stalled=[]`；这表示四个 raw image topic 都没有新帧，不是 SDK 连接或夹爪命令问题。
+近期现场记录已证实腕部相机 ISP/MIPI/SerDes 初始化失败，需修复 X5 相机 runtime 并确认 raw
+`sensor_msgs/Image` 有实际帧，不应继续调大 capture timeout。详见 [`camera-image-capture.md`](camera-image-capture.md)。
+
+## 2026-07-24 13:53 CST - 提高键盘双臂末端控制响应速度（agent: Codex）
+
+按用户“速度再大一些”的要求，默认 P7 `set_arm_speed` 从 `0.55` 提高到 `1.5 rad/s`，键盘命令
+最小间隔从 `80ms` 降到 `40ms`（按住键时最高约 25 Hz）；单次位姿增量仍是 `2mm/2deg`，启动位姿
+包络仍是 `5cm/30deg`。Ruff、编译、纯数学/按键测试（`3 passed`）和 diff 检查通过，未连接机器人。
+因此响应速度提高而工作空间护栏不变。详见
+[`keyboard-eef-control.md`](keyboard-eef-control.md)。
+
+## 2026-07-24 13:42 CST - 复核闭合夹爪后的双腕相机抓帧失败（agent: Codex）
+
+用户闭合夹爪成功后，双腕抓帧在 8 秒后超时。板端只读检查确认用户指定的两个 raw image topic 和当前
+规范 raw image topic 都不存在；ROS graph 仅有静态 `video_encoded` 名称。`arm_app` gRPC 服务仍在线，
+但本轮 `robot_app` 在 13:38 启动六路相机时全部失败：腕部四路均为 `create_isp_node ... ret -10`，汇总
+`0 initialized, 0 started, 6 failed`。根因是 X5 相机 ISP/MIPI 初始化，不能由脚本 topic/QoS/超时修复；
+需先修复板端并确认 raw `sensor_msgs/Image` 实际发布。详见 [`camera-image-capture.md`](camera-image-capture.md)。
+
+## 2026-07-24 14:23 CST - 明确 VIO 双臂 replay 的初始位置语义（agent: Codex）
+
+检查 `p7_replay_vio_dual_arm_trajectory.py` 及 NPZ 第 0 帧，确认记录的左右相对平移和旋转均为零。
+真实执行不会去固定 ready pose，而是在申请控制权前每臂连续读取三次实际 TCP，漂移不超过 3mm 后取最后
+一次为 `replay_start_xyz/xyzw`；首个 arm target 就是该实时 TCP，后续以其为基座合成相对轨迹。本次命令
+未加 `--replay-grippers`，不会命令夹爪。详见 [`vio-dual-arm-replay.md`](vio-dual-arm-replay.md)。
+
+## 2026-07-24 14:23 CST - VIO replay 默认先移动至 recovery 预设位置（agent: Codex）
+
+依据 `openpi_p7_unlimited_recovery.sh` 与 `move_p7_to_ready_joint_pose.sh` 的既有 ready pose，replay 脚本
+现会在真实执行时先将双臂移到 `[0,0.647,0,-0.933,0,0,-1.15] rad` 并打开夹爪至 `95mm`，随后才采样
+replay 基座 TCP。新 `--skip-ready-pose` 可跳过该流程；默认 3rad 关节差 guard 会拒绝超限移动。用户明确
+要求不检查，本轮未连接机器人、未执行、未编译或测试。详见 [`vio-dual-arm-replay.md`](vio-dual-arm-replay.md)。
+
+## 2026-07-24 14:23 CST - 核对 VIO replay 与 recovery 的左右臂映射（agent: Codex）
+
+代码和 NPZ metadata 对照确认：recovery 与 replay 都是 left 端口 `50071`、right 端口 `50072`；ready pose
+对两臂使用相同 7D 目标，新增 ready 流程不会造成左右交换。NPZ 也显式定义前 7D 为 left、后 7D 为 right。
+是否为 VIO source pose 与物理臂的现场方向不一致，不能仅凭代码确认，故未盲目交换或控制机器人。详见
+[`vio-dual-arm-replay.md`](vio-dual-arm-replay.md)。
+
+## 2026-07-24 - 取消键盘双臂遥操作的平移和旋转包络（agent: Codex）
+
+删除 `keyboard_dual_arm_teleop.py` 的 `--max-envelope-m`、`--max-rotation-deg` 参数及累计位姿越界拒绝；
+`keyboard_dual_arm_teleop.sh` 同步停止传入两项限制。单步增量、命令间隔、SDK 速度和真实运动双开关仍保留。
+未连接或控制机器人。详见 [`keyboard-eef-control.md`](keyboard-eef-control.md)。
+
+## 2026-07-24 22:18 CST - 尝试只读记录双臂当前 joint pose（agent: Codex）
+
+`.venv-p7-ros` 创建左臂 `AirbotClient(192.168.25.1:50071)` 时 gRPC readiness 超时，未进入
+`get_arm_joint_state()`，右臂未尝试，因此没有获得可记录的 joint pose。未申请控制权、切控制器或发送动作。
+详见 [`p7-sdk-grpc-current-state.md`](p7-sdk-grpc-current-state.md)。
+
+## 2026-07-24 14:23 CST - 按现场确认交换 VIO source pose 的左右输入（agent: Codex）
+
+用户确认 VIO source pose 左右标签相对物理 AIRBOT 双臂相反。replay 保持左臂 `50071`、右臂 `50072`
+端口不变，改为物理 left 读取 NPZ 的 VIO right `7:14`，物理 right 读取 VIO left `0:7`；位移、旋转、
+夹爪值作为同一 7D 段整体交换。未连接、控制或验证机器人。详见
+[`vio-dual-arm-replay.md`](vio-dual-arm-replay.md)。
+
+## 2026-07-24 14:34 CST - 排除键盘遥操作的客户端占用（agent: Codex）
+
+本机无键盘遥操作/persistent loop/replay/推理控制进程或 `50071/50072` 监听；X5 两个端口由左右
+`arm_app` 自己监听，TCP 连通。但 `.venv-p7-sdk` 的只读 `AirbotClient` 仍在 gRPC readiness 3 秒超时，
+发生在申请控制权之前。X5 当时两 arm_app CPU 约 44%/47%、remote robot_app 约 35%，日志还出现 CAN
+`No buffer space available`、FK RPC timeout 与周期超时。后续源码对照确认 SDK timeout 的直接原因是本机
+代理环境，而不是这些板端警告或其他客户端持有控制权。详见
+[`p7-sdk-grpc-current-state.md`](p7-sdk-grpc-current-state.md)。
+
+## 2026-07-24 14:38 CST - 排除键盘封装与 replay 的 Python 环境差异（agent: Codex）
+
+键盘封装默认 `.venv-p7-sdk`（Python 3.11 / grpcio 1.81.1），replay 命令使用 `.venv-p7-ros`
+（Python 3.12 / grpcio 1.82.1）。初次两环境 probe 都超时，是因为二者都继承了本机
+`all_proxy/http_proxy/https_proxy`；replay 源码会在建连前清除这些变量。
+同时检查到当前键盘 shell 封装覆盖为 `5mm/3deg` 单步、`1m/90deg` 包络，远大于 Python 安全默认；
+这不造成 timeout，但会放宽真实运动限制。详见 [`p7-sdk-grpc-current-state.md`](p7-sdk-grpc-current-state.md)
+和 [`keyboard-eef-control.md`](keyboard-eef-control.md)。
+
+## 2026-07-24 14:50 CST - 复用 replay 的无代理 gRPC 建连方式（agent: Codex）
+
+对照 replay 源码发现其在 `AirbotClient` 前调用 `configure_direct_grpc()`：清除六个大小写 HTTP/SOCKS
+代理变量并将机器人 IP 加到 `NO_PROXY`。本机代理值为 `all_proxy=socks5://127.0.0.1:7897`、
+`http_proxy/https_proxy=http://127.0.0.1:7897`；继承它们才导致键盘脚本 gRPC timeout。键盘封装已改为
+replay 使用的 `.venv-p7-ros`，键盘 Python 也复用同款无代理配置；此前加入的重试已删除。用无代理
+`.venv-p7-ros` probe 已立即返回 `IDLE/idle/valid`；Ruff、编译、封装 help 和 pytest `4 passed` 通过，
+随后 keyboard shell 默认 dry-run 也实测移除三项代理变量、读取双臂 `IDLE/idle/valid` 并由 `q` 正常退出，
+未控制机器人。详见
+[`p7-sdk-grpc-current-state.md`](p7-sdk-grpc-current-state.md) 和
+[`keyboard-eef-control.md`](keyboard-eef-control.md)。
+
+## 2026-07-24 22:18 CST - 定位 VIO replay 实测包络拒绝（agent: Codex）
+
+用户回放被 `--max-measured-envelope-m 0.42` 拒绝：left 实测 `0.116361m`，right 实测
+`0.427879m`。只读核对 summary、轨迹与代码后确认，物理 right 计划整段最大仅
+`0.227870m`，实测多出 `0.200010m`（`1.878x`），安全保护正常中止了明显的 Cartesian
+跟踪偏离，不应直接调大阈值。新 ready joint 的 joint4=`0` 接近伸直奇异位形，是首要
+嫌疑；现有 summary 缺触发帧与 target-vs-measured 误差，故暂不将根因表述为完全证实。
+本轮未连接或控制机器人。详见 [`vio-dual-arm-replay.md`](vio-dual-arm-replay.md)。
+
+## 2026-07-24 22:34 CST - 修正抓图脚本的 gRPC 代理路由
+
+`close_grippers_capture_wrist_images.py --execute` 在 `192.168.25.1:50071` 超时，而键盘脚本成功。对比最近
+14:50 记录确认：键盘脚本在建立 `AirbotClient` 前移除六个 HTTP/SOCKS 代理变量并设置
+`NO_PROXY`，抓图脚本缺少该步骤，故继承本机代理后超时。已补齐同样的
+`configure_direct_grpc()`；`.venv-p7-ros` 编译与 diff 检查通过，未重跑真机或下发夹爪动作。详见
+[`p7-sdk-grpc-current-state.md`](p7-sdk-grpc-current-state.md)。

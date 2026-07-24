@@ -210,3 +210,46 @@ cd /home/discover/Desktop/Openpi_RL
 
 脚本不会并发移动双臂；顺序为方向、轴、手臂，每个目标后输出轴向误差、交叉轴位移、总目标
 误差和返回误差。`--execute` 必须与 `--allow-robot-motion` 同时提供，否则拒绝运动。
+
+### 4.4 闭合双夹爪并保存双腕单帧图片
+
+脚本会先闭合左右夹爪，再以原始分辨率保存左右腕部立体相机共四张 JPG，并保存一张重叠图。默认 dry-run，
+真实执行需要 `--execute --allow-robot-motion`：
+
+```bash
+.venv-p7-ros/bin/python examples/airbot/close_grippers_capture_wrist_images.py \
+  --output-prefix ./data/closed_wrist \
+  --execute --allow-robot-motion
+```
+
+四张原始尺寸单图：
+
+```text
+./data/closed_wrist_left_wrist_left_rgb.jpg
+./data/closed_wrist_left_wrist_right_rgb.jpg
+./data/closed_wrist_right_wrist_left_rgb.jpg
+./data/closed_wrist_right_wrist_right_rgb.jpg
+./data/closed_wrist_wrist_overlay.jpg
+```
+
+默认 host 为 `192.168.25.1`，四路 topic 为 `/robot/camera/{left_wrist,right_wrist}/{left,right}/image`。
+
+### 4.5 键盘控制双臂末端六自由度
+
+脚本：`examples/airbot/keyboard_dual_arm_teleop.py`。默认是 dry-run，运行时仍会读取左右 TCP pose，
+但不会申请控制权或调用 `move_end_pose()`：
+
+```bash
+bash scripts/cmds/keyboard_dual_arm_teleop.sh
+```
+
+清空工作空间后，实际运动必须显式传入两个开关：
+
+```bash
+bash scripts/cmds/keyboard_dual_arm_teleop.sh --execute --allow-robot-motion
+```
+
+`1`/`2`/`b` 选择左臂/右臂/双臂；`w/s`、`a/d`、`r/f` 控制 `X/Y/Z`；`i/k`、`j/l`、`u/o`
+控制 roll/pitch/yaw；`q` 或 Ctrl-C 会切回 `idle` 并释放控制权。默认每次按键移动 `2mm`、旋转 `2deg`，
+相对启动 TCP 受 `5cm` 平移和 `30deg` 姿态包络限制；不控制夹爪。可通过 `P7_TELEOP_*` 环境变量或
+Python 脚本参数调整，`--frame local` 改为 TCP 局部坐标系。

@@ -39,6 +39,9 @@
 | [`codex-cli-update.md`](codex-cli-update.md) | Codex CLI 官方安装脚本与 `codex update` 检查：确认代理下载可用，并已从 0.142.4 更新到 0.142.5 |
 | [`worktree-cleanup-20260720.md`](worktree-cleanup-20260720.md) | 工作树改动审计：已删除的临时残片、保留的核心链路与实验工具分类 |
 | [`github-fork-push-20260723.md`](github-fork-push-20260723.md) | GitHub fork/push：已创建 `by-luckk/Openpi_RL`，通过 SSH 推送 `master` 并验证远端 commit |
+| [`camera-image-capture.md`](camera-image-capture.md) | 双腕相机读取与保存入口：MP4、单帧 NPZ、推理 MCAP 及默认开关 |
+| [`vio-dual-arm-replay.md`](vio-dual-arm-replay.md) | VIO 相对 TCP 双臂轨迹的安全 replay：文件语义、插值、包络与执行命令 |
+| [`keyboard-eef-control.md`](keyboard-eef-control.md) | 键盘控制双臂末端 XYZ/RPY 的现状核对：现有键盘、遥操和 P7 CartesianPose 能力边界 |
 
 ## 怎么新增记录
 

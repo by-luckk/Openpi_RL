@@ -51,20 +51,20 @@ class InferConfig(BaseModel):
     max_steps: int = 500000
     step_rate: int = 200
     reset_action: list[float] = [
-        -0.,
-        -1.,
-        0.8,
-        1.6,
-        -0.6,
-        -1.7,
-        0.0,
-        -0.,
-        -1.,
-        0.8,
-        -1.6,
-        0.6,
-        1.7,
-        0.0,
+        0.53006,
+        -0.99584,
+        0.88388,
+        -1.52972,
+        1.17247,
+        1.38685,
+        0.03281954,
+        -0.41905,
+        -1.05077,
+        0.86290,
+        1.44579,
+        -1.35157,
+        -1.22854,
+        0.01116662,
     ]
     # -1 means keep inference running continuously. Non-negative values trigger
     # a new inference only when the remaining queue length drops below threshold.

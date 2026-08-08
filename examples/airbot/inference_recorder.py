@@ -6,19 +6,20 @@ This allows recorded data to be directly converted to LeRobot format
 for re-training using the existing conversion scripts.
 """
 
+from collections import defaultdict
 import logging
+from pathlib import Path
 import queue
 import threading
 import time
-from collections import defaultdict
-from pathlib import Path
 from typing import Optional
 
+from airdc.common.samplers.basis import SaveType
+from airdc.common.samplers.basis import TaskInfo
+from airdc.common.samplers.mcap_sampler import McapDataSampler
+from airdc.common.samplers.mcap_sampler import McapDataSamplerConfig
 import numpy as np
 from pydantic import BaseModel
-
-from airdc.common.samplers.mcap_sampler import McapDataSampler, McapDataSamplerConfig
-from airdc.common.samplers.basis import SaveType, TaskInfo
 
 logger = logging.getLogger(__name__)
 
@@ -352,6 +353,8 @@ class InferenceRecorder:
                 self._queue.put(None)  # Sentinel
             self._worker_thread.join(timeout=2.0)
 
+        sampler_shutdown = getattr(self._sampler, "shutdown", None)
+        if callable(sampler_shutdown):
+            sampler_shutdown()
         if self._sampler is not None:
-            self._sampler.shutdown()
             logger.info("Inference recorder shut down.")

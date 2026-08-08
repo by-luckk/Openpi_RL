@@ -14,6 +14,8 @@ from airdc.utils import init_logging
 from dagger_controller import DaggerConfig
 from dagger_controller import DaggerController
 from dagger_controller import DaggerMode
+from delta_pose import advance_takeover_deadline
+from delta_pose import delta_pose_target
 from inference_recorder import InferenceRecorder
 from inference_recorder import RecordConfig
 import numpy as np
@@ -303,7 +305,7 @@ class AsyncChunkController:
                 action_chunk = action_chunk[:, :robot_dof]
             infer_dt = time.monotonic() - infer_start
             self._last_inference_time = time.monotonic()
-            
+
             # Track steps between inferences
             steps_since_last = request_step - self._last_inference_step
             self._last_inference_step = request_step
@@ -448,8 +450,7 @@ def model_inference(config: InferConfig, operator: System):
                 logger.info("Quitting...")
                 break
 
-            operator.switch_mode(SystemMode.RESETTING)
-            operator.send_action(config.reset_action)
+            operator.reset_to_action(config.reset_action)
 
             if keyboard_listener:
                 logger.info("Press 'Enter' to start episode...")
@@ -489,17 +490,27 @@ def model_inference(config: InferConfig, operator: System):
                 discard_requested = False
                 queue_starved_logged = False
                 prev_demo_qpos = None
-                
+                pending_delta_obs = None
+                delta_references = None
+                delta_zeroing_announced = False
+                next_takeover_deadline = 0.0
+
                 # Frequency monitoring
                 last_step_time = time.monotonic()
                 step_times = []
                 freq_log_interval = 100  # Log frequency every N steps
-                
+
                 # Performance profiling
                 perf_obs_times = []
                 perf_record_times = []
                 perf_action_times = []
                 last_action = np.asarray(config.reset_action, dtype=np.float32)
+
+                def record_delta_result(observation, action, previous_action):
+                    if dagger_ctrl.record_demo_frame(action, previous_action):
+                        recorder.record_step(observation, action, intervention=1)
+                    dagger_ctrl.count_step(intervention=True)
+                    return action.copy()
 
                 try:
                     while t < config.max_steps:
@@ -571,7 +582,7 @@ def model_inference(config: InferConfig, operator: System):
 
                             async_controller.mark_step_executed()
                             t += 1
-                            
+
                             # Monitor actual execution frequency
                             current_time = time.monotonic()
                             step_times.append(current_time - last_step_time)
@@ -579,16 +590,37 @@ def model_inference(config: InferConfig, operator: System):
                             if t % freq_log_interval == 0 and len(step_times) >= freq_log_interval:
                                 avg_step_time = sum(step_times[-freq_log_interval:]) / freq_log_interval
                                 actual_freq = 1.0 / avg_step_time if avg_step_time > 0 else 0
-                                
+
                                 # Calculate average times for each operation
                                 avg_obs = sum(perf_obs_times[-freq_log_interval:]) / min(len(perf_obs_times), freq_log_interval) * 1000
                                 avg_record = sum(perf_record_times[-freq_log_interval:]) / min(len(perf_record_times), freq_log_interval) * 1000
                                 avg_action = sum(perf_action_times[-freq_log_interval:]) / min(len(perf_action_times), freq_log_interval) * 1000
-                                
+
                                 logger.info(
                                     "Actual freq: %.1f Hz (target: %d Hz) | Timing: obs=%.1fms, record=%.1fms, action=%.1fms",
                                     actual_freq, config.step_rate, avg_obs, avg_record, avg_action
                                 )
+
+                        elif dagger_ctrl.mode == DaggerMode.ZEROING:
+                            if dagger_ctrl.config.takeover_mode != "delta_pose":
+                                raise RuntimeError("ZEROING mode requires delta-pose takeover")
+                            if not delta_zeroing_announced:
+                                async_controller.clear_actions()
+                                pending_delta_obs = None
+                                prev_demo_qpos = None
+                                delta_references = None
+                                logger.info(
+                                    "[DAgger] Policy paused. Move the leaders to a comfortable pose, then press Enter to set delta zero."
+                                )
+                                delta_zeroing_announced = True
+                            if dagger_ctrl.consume_zero_request():
+                                delta_references = operator.capture_takeover_references()
+                                operator.enable_follower_pose_servo()
+                                dagger_ctrl.begin_delta_demonstration()
+                                next_takeover_deadline = time.monotonic()
+                                delta_zeroing_announced = False
+                            else:
+                                time.sleep(0.01)
 
                         elif dagger_ctrl.mode == DaggerMode.ALIGNING:
                             logger.info("[DAgger] Starting alignment...")
@@ -603,39 +635,92 @@ def model_inference(config: InferConfig, operator: System):
                             )
 
                         elif dagger_ctrl.mode == DaggerMode.DEMONSTRATING:
-                            raw_obs, _policy_observation = update_observation(auto_config.camera_names, operator)
-                            leader_qpos = operator.get_leader_qpos()
-                            operator.send_action(leader_qpos)
-                            if dagger_ctrl.record_demo_frame(leader_qpos, prev_demo_qpos):
-                                recorder.record_step(raw_obs, leader_qpos, intervention=1)
-                            dagger_ctrl.count_step(intervention=True)
-                            prev_demo_qpos = leader_qpos.copy()
+                            if dagger_ctrl.config.takeover_mode == "delta_pose":
+                                if delta_references is None:
+                                    raise RuntimeError("Delta-pose takeover started without zero references")
 
-                            # Sleep for remaining time to hit target step_rate
-                            step_duration = 1.0 / config.step_rate
-                            elapsed = time.monotonic() - step_start
-                            if elapsed < step_duration:
-                                time.sleep(step_duration - elapsed)
+                                raw_obs, _policy_observation = update_observation(auto_config.camera_names, operator)
+                                follower_qpos = np.asarray(operator.get_qpos(raw_obs), dtype=np.float32)
+                                if pending_delta_obs is not None:
+                                    prev_demo_qpos = record_delta_result(
+                                        pending_delta_obs,
+                                        follower_qpos,
+                                        prev_demo_qpos,
+                                    )
+                                    t += 1
 
-                            t += 1
+                                leader_states = operator.capture_leader_states()
+                                targets = {
+                                    group: delta_pose_target(delta_references[group], state)
+                                    for group, state in leader_states.items()
+                                }
+                                operator.send_takeover_targets(targets)
+                                pending_delta_obs = raw_obs
+
+                                period = 1.0 / dagger_ctrl.config.takeover_rate
+                                next_takeover_deadline, lag = advance_takeover_deadline(
+                                    next_takeover_deadline,
+                                    time.monotonic(),
+                                    period,
+                                )
+                                if lag > dagger_ctrl.config.max_takeover_lag:
+                                    raise RuntimeError(
+                                        f"Delta-pose takeover lag {lag:.3f}s exceeds "
+                                        f"{dagger_ctrl.config.max_takeover_lag:.3f}s"
+                                    )
+                                remaining = next_takeover_deadline - time.monotonic()
+                                if remaining > 0:
+                                    time.sleep(remaining)
+                            else:
+                                raw_obs, _policy_observation = update_observation(auto_config.camera_names, operator)
+                                leader_qpos = operator.get_leader_qpos()
+                                operator.send_action(leader_qpos)
+                                if dagger_ctrl.record_demo_frame(leader_qpos, prev_demo_qpos):
+                                    recorder.record_step(raw_obs, leader_qpos, intervention=1)
+                                dagger_ctrl.count_step(intervention=True)
+                                prev_demo_qpos = leader_qpos.copy()
+
+                                step_duration = 1.0 / config.step_rate
+                                elapsed = time.monotonic() - step_start
+                                if elapsed < step_duration:
+                                    time.sleep(step_duration - elapsed)
+                                t += 1
 
                         elif dagger_ctrl.mode == DaggerMode.RESUMING:
                             logger.info("[DAgger] Resuming inference...")
-                            prev_demo_qpos = None
                             async_controller.clear_actions()
+                            if dagger_ctrl.config.takeover_mode == "delta_pose":
+                                if pending_delta_obs is not None:
+                                    follower_qpos = operator.get_follower_qpos().astype(np.float32)
+                                    prev_demo_qpos = record_delta_result(
+                                        pending_delta_obs,
+                                        follower_qpos,
+                                        prev_demo_qpos,
+                                    )
+                                    t += 1
+                                    pending_delta_obs = None
+                                operator.enable_follower_joint_servo()
+                                delta_references = None
+                            else:
+                                prev_demo_qpos = None
 
-                            def _home_leaders(cancel_event):
-                                try:
-                                    operator.switch_leader_mode(SystemMode.RESETTING)
-                                    operator.send_leader_action(np.asarray(config.reset_action, dtype=np.float32))
-                                    if cancel_event.wait(timeout=1.0):
-                                        logger.info("[DAgger] Leader homing cancelled by new intervention.")
-                                        return
-                                    operator.switch_leader_mode(SystemMode.PASSIVE)
-                                except Exception as exc:
-                                    logger.warning("[DAgger] Leader homing failed: %s", exc)
+                                def _home_leaders(cancel_event):
+                                    try:
+                                        operator.switch_leader_mode(SystemMode.RESETTING)
+                                        operator.send_leader_action(np.asarray(config.reset_action, dtype=np.float32))
+                                        if cancel_event.wait(timeout=1.0):
+                                            logger.info("[DAgger] Leader homing cancelled by new intervention.")
+                                            return
+                                        operator.switch_leader_mode(SystemMode.PASSIVE)
+                                    except Exception as exc:
+                                        logger.warning("[DAgger] Leader homing failed: %s", exc)
 
-                            threading.Thread(target=_home_leaders, args=(dagger_ctrl._homing_cancel,), daemon=True).start()
+                                threading.Thread(
+                                    target=_home_leaders,
+                                    args=(dagger_ctrl._homing_cancel,),
+                                    daemon=True,
+                                ).start()
+
                             dagger_ctrl.complete_resume()
                             raw_obs, policy_observation = update_observation(auto_config.camera_names, operator)
                             async_controller.update_observation(policy_observation)
@@ -649,6 +734,17 @@ def model_inference(config: InferConfig, operator: System):
                             last_action = np.asarray(policy_observation["qpos"], dtype=np.float32).copy()
 
                 finally:
+                    if dagger_ctrl and dagger_ctrl.config.takeover_mode == "delta_pose":
+                        if pending_delta_obs is not None and not discard_requested:
+                            try:
+                                follower_qpos = operator.get_follower_qpos().astype(np.float32)
+                                record_delta_result(pending_delta_obs, follower_qpos, prev_demo_qpos)
+                            except Exception:
+                                logger.exception("Failed to flush the final delta-pose intervention frame")
+                        try:
+                            operator.enable_follower_joint_servo()
+                        except Exception:
+                            logger.exception("Failed to restore follower joint servo mode")
                     async_controller.shutdown()
 
                 dagger_stats = dagger_ctrl.stats.to_dict() if dagger_ctrl else None

@@ -9,14 +9,15 @@ Implements the DAgger (Dataset Aggregation) mechanism:
 Reference: kai0 (OpenDriveLab) DAgger implementation + π0.6* paper.
 """
 
+from dataclasses import dataclass
+from dataclasses import field
+from enum import Enum
 import logging
 import math
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional
 
 import numpy as np
 from pydantic import BaseModel
@@ -28,6 +29,7 @@ class DaggerMode(Enum):
     """DAgger state machine modes."""
     INFERENCE = "inference"
     ALIGNING = "aligning"
+    ZEROING = "zeroing"
     DEMONSTRATING = "demonstrating"
     RESUMING = "resuming"
 
@@ -52,6 +54,9 @@ class DaggerConfig(BaseModel):
     align_duration: float = 1.0
     gripper_threshold: float = 0.5
     demo_motion_threshold: float = 0.01
+    takeover_mode: Literal["joint", "delta_pose"] = "joint"
+    takeover_rate: float = 30.0
+    max_takeover_lag: float = 0.25
 
 
 @dataclass
@@ -122,6 +127,10 @@ class DaggerController:
     """
 
     def __init__(self, config: DaggerConfig):
+        if config.takeover_rate <= 0:
+            raise ValueError("takeover_rate must be positive")
+        if config.max_takeover_lag <= 0:
+            raise ValueError("max_takeover_lag must be positive")
         self.config = config
 
         # Thread-safe mode state
@@ -138,6 +147,7 @@ class DaggerController:
         self._reset_requested = threading.Event()
         self._discard_requested = threading.Event()
         self._start_event = threading.Event()
+        self._zero_event = threading.Event()
         self._homing_cancel = threading.Event()  # Set to cancel in-progress leader homing
         self._keyboard_thread: Optional[threading.Thread] = None
 
@@ -155,7 +165,7 @@ class DaggerController:
 
     @property
     def is_intervention(self) -> bool:
-        return self.mode in (DaggerMode.DEMONSTRATING, DaggerMode.ALIGNING)
+        return self.mode in (DaggerMode.DEMONSTRATING, DaggerMode.ALIGNING, DaggerMode.ZEROING)
 
     @property
     def inference_paused(self) -> bool:
@@ -200,11 +210,14 @@ class DaggerController:
             while not self._shutdown.is_set():
                 ch = sys.stdin.read(1)
                 if ch in ("\r", "\n"):
-                    self._start_event.set()
+                    if self.mode == DaggerMode.ZEROING:
+                        self.request_zero_reference()
+                    else:
+                        self._start_event.set()
                 elif ch == self.config.key_enter_dagger:
-                    self._on_enter_dagger()
+                    self.request_intervention()
                 elif ch == self.config.key_resume_inference:
-                    self._on_resume_inference()
+                    self.request_resume()
                 elif ch == "r":
                     logger.info("[DAgger] Reset (save) requested.")
                     self._reset_requested.set()
@@ -230,7 +243,7 @@ class DaggerController:
                 return False
         return True
 
-    def _on_enter_dagger(self):
+    def request_intervention(self) -> None:
         if self.mode != DaggerMode.INFERENCE:
             logger.debug("[DAgger] Already in DAgger mode, ignoring 'i' press.")
             return
@@ -239,15 +252,31 @@ class DaggerController:
         # the homing thread switches leader back to PASSIVE during alignment.
         self._homing_cancel.set()
         self._pause_event.set()
-        self.mode = DaggerMode.ALIGNING
+        self.mode = DaggerMode.ZEROING if self.config.takeover_mode == "delta_pose" else DaggerMode.ALIGNING
         self.stats.start_intervention(self._step_counter)
 
-    def _on_resume_inference(self):
-        if self.mode not in (DaggerMode.DEMONSTRATING, DaggerMode.ALIGNING):
+    def request_resume(self) -> None:
+        if self.mode not in (DaggerMode.DEMONSTRATING, DaggerMode.ALIGNING, DaggerMode.ZEROING):
             logger.warning("[DAgger] Not in DAgger mode, ignoring 'o' press.")
             return
         logger.info("[DAgger] >>> Resuming inference mode...")
         self.mode = DaggerMode.RESUMING
+
+    def request_zero_reference(self) -> None:
+        if self.mode == DaggerMode.ZEROING:
+            self._zero_event.set()
+
+    def consume_zero_request(self) -> bool:
+        if not self._zero_event.is_set():
+            return False
+        self._zero_event.clear()
+        return True
+
+    def begin_delta_demonstration(self) -> None:
+        if self.mode != DaggerMode.ZEROING:
+            raise RuntimeError(f"Cannot start delta-pose takeover from mode {self.mode.value}")
+        self.mode = DaggerMode.DEMONSTRATING
+        logger.info("[DAgger] Delta-pose zero captured. Human takeover is active.")
 
     # ── Arm Alignment ──────────────────────────────────────
 
@@ -403,6 +432,7 @@ class DaggerController:
         self._reset_requested.clear()
         self._discard_requested.clear()
         self._start_event.clear()
+        self._zero_event.clear()
 
     def shutdown(self):
         """Clean shutdown."""

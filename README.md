@@ -390,6 +390,8 @@ bash scripts/cmds/infer_sync.sh
 bash scripts/cmds/infer_async.sh
 ```
 
+相机设备号不是固定的。普通推理入口使用 [`examples/airbot/robot_config.py`](examples/airbot/robot_config.py) 中的默认映射；PTK 入口 `scripts/cmds/infer_async_ptk.sh` 会按稳定的 USB 物理路径自动发现相机，并按 `base_0_rgb`、`left_wrist_0_rgb`、`right_wrist_0_rgb` 的顺序覆盖该映射。
+
 两个推理脚本的公共参数：
 
 | 参数 | 默认值 | 说明 |

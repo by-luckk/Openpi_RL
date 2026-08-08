@@ -4,8 +4,8 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
-POLICY_CONFIG=pi06_rl_pretrain_airbot_clothes_folding
-CHECKPOINT_DIR=checkpoints/pi06_rl_pretrain_airbot_clothes_folding/policy_iter0/XXXXX
+POLICY_CONFIG=pi06_rl_pretrain_airbot_joint
+CHECKPOINT_DIR=ckpts/ckpts/380000
 PORT=8000
 TMP_ROOT=./.tmp/serve_policy
 # ───────────────────────────────────────────────────────────────────────────────
@@ -22,7 +22,7 @@ TEMP="${TMP_ROOT}" \
 TMP="${TMP_ROOT}" \
 XDG_CACHE_HOME="${TMP_ROOT}/xdg_cache" \
 JAX_COMPILATION_CACHE_DIR="${TMP_ROOT}/jax_cache" \
-uv run scripts/serve_policy.py \
+uv run --frozen --no-dev --no-group rlds scripts/serve_policy.py \
     --port "${PORT}" \
     policy:checkpoint \
     --policy.config "${POLICY_CONFIG}" \

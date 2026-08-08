@@ -67,6 +67,12 @@ class AssetsConfig:
 class DataConfig:
     # LeRobot repo id. If None, fake data will be created.
     repo_id: str | None = None
+    # Several LeRobot repo ids for joint multi-task training. Mutually exclusive with repo_id.
+    repo_ids: Sequence[str] | None = None
+    # Allow libraries that lack VF label columns to be mixed in with placeholder values.
+    allow_vf_placeholders: bool = False
+    # Temperature for task-balanced sampling (multi-repo only). T=1 proportional, T=2 mild oversample of smaller tasks.
+    task_balance_temperature: float | None = None
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
@@ -197,6 +203,8 @@ class ModelTransformFactory(GroupFactory):
 class DataConfigFactory(abc.ABC):
     # The LeRobot repo id.
     repo_id: str = tyro.MISSING
+    # Several LeRobot repo ids to train on jointly. Mutually exclusive with repo_id.
+    repo_ids: tyro.conf.Suppress[Sequence[str] | None] = None
     # Determines how the assets will be loaded.
     assets: AssetsConfig = dataclasses.field(default_factory=AssetsConfig)
     # Base config that will be updated by the factory.
@@ -208,10 +216,16 @@ class DataConfigFactory(abc.ABC):
 
     def create_base_config(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         repo_id = self.repo_id if self.repo_id is not tyro.MISSING else None
-        asset_id = self.assets.asset_id or repo_id
+        if self.repo_ids and repo_id is not None:
+            import logging as _logging
+            _logging.info("repo_ids set; ignoring repo_id=%r from CLI", repo_id)
+            repo_id = None
+        default_asset_id = "+".join(self.repo_ids) if self.repo_ids else repo_id
+        asset_id = self.assets.asset_id or default_asset_id
         return dataclasses.replace(
             self.base_config or DataConfig(),
             repo_id=repo_id,
+            repo_ids=list(self.repo_ids) if self.repo_ids else None,
             asset_id=asset_id,
             norm_stats=self._load_norm_stats(epath.Path(self.assets.assets_dir or assets_dirs), asset_id),
             use_quantile_norm=model_config.model_type != ModelType.PI0,
@@ -564,7 +578,171 @@ _CONFIGS = [
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         weight_loader=weight_loaders.ValueFunctionWeightLoader(
-            gemma3_dir="/home/kding/.cache/huggingface/hub/models--unsloth--gemma-3-270m/snapshots/edcf1fe394ee1168e7c5538afd104cfb1f7947e6",
+            gemma3_dir="/data/lee/FastWAM_PI_RL/checkpoints/pretrained/gemma3_270m",
+            load_siglip=True,
+        ),
+        ema_decay=None,
+        num_train_steps=40_000, # 10_000 would be enough for 330 episodes
+        log_interval=100,
+        save_interval=2000,
+        keep_period=4000,
+        wandb_enabled=True,
+    ),
+    TrainConfig(
+        name="pi06_rl_vf_airbot_fold_and_hang",
+        model=value_function.ValueFunctionConfig(
+            model_type=_model.ModelType.VALUE_FUNCTION,
+            gemma_variant="gemma_270m",
+            discrete_state_input=True,
+            num_bins=200,
+            return_min=0.0,
+            return_max=1.0,
+            action_horizon=1,
+            action_dim=14,
+        ),
+        data=LeRobotAirbotVFDataConfig(
+            repo_id="fold_and_hang_cloth_v1",
+            base_config=DataConfig(prompt_from_task=True, action_sequence_keys=()),
+            enable_symmetry_aug=False,
+            enable_channel_permutation_aug=True,
+        ),
+        batch_size=48*torch.cuda.device_count(), # Set to 48*GPU_count by default
+        num_workers=6*torch.cuda.device_count(),
+        seed=42,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-4,
+            decay_steps=40_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.ValueFunctionWeightLoader(
+            gemma3_dir="/data/lee/FastWAM_PI_RL/checkpoints/pretrained/gemma3_270m",
+            load_siglip=True,
+        ),
+        ema_decay=None,
+        num_train_steps=40_000, # 10_000 would be enough for 330 episodes
+        log_interval=100,
+        save_interval=2000,
+        keep_period=4000,
+        wandb_enabled=True,
+    ),
+    # 2026-07-30 added: merged box library (box_v1 + box_v1_dagger + box_v2 + box_wuxi = 6949 ep, 2 tasks)
+    TrainConfig(
+        name="pi06_rl_vf_airbot_box",
+        model=value_function.ValueFunctionConfig(
+            model_type=_model.ModelType.VALUE_FUNCTION,
+            gemma_variant="gemma_270m",
+            discrete_state_input=True,
+            num_bins=200,
+            return_min=0.0,
+            return_max=1.0,
+            action_horizon=1,
+            action_dim=14,
+        ),
+        data=LeRobotAirbotVFDataConfig(
+            repo_id="box",
+            base_config=DataConfig(prompt_from_task=True, action_sequence_keys=()),
+            enable_symmetry_aug=False,
+            enable_channel_permutation_aug=True,
+        ),
+        batch_size=48*torch.cuda.device_count(), # Set to 48*GPU_count by default
+        num_workers=6*torch.cuda.device_count(),
+        seed=42,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-4,
+            decay_steps=40_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.ValueFunctionWeightLoader(
+            gemma3_dir="/data/lee/FastWAM_PI_RL/checkpoints/pretrained/gemma3_270m",
+            load_siglip=True,
+        ),
+        ema_decay=None,
+        num_train_steps=40_000, # 10_000 would be enough for 330 episodes
+        log_interval=100,
+        save_interval=2000,
+        keep_period=4000,
+        wandb_enabled=True,
+    ),
+    # 2026-07-31 joint VF across all 3 tasks (iter1)
+    TrainConfig(
+        name="pi06_rl_vf_airbot_joint",
+        model=value_function.ValueFunctionConfig(
+            model_type=_model.ModelType.VALUE_FUNCTION,
+            gemma_variant="gemma_270m",
+            discrete_state_input=True,
+            num_bins=200,
+            return_min=0.0,
+            return_max=1.0,
+            action_horizon=1,
+            action_dim=14,
+        ),
+        data=LeRobotAirbotVFDataConfig(
+            repo_ids=["fold_clothv3", "box", "make_coffee"],
+            base_config=DataConfig(
+                prompt_from_task=True,
+                action_sequence_keys=(),
+                task_balance_temperature=2.0,
+                allow_vf_placeholders=True,
+            ),
+            enable_symmetry_aug=False,
+            enable_channel_permutation_aug=True,
+        ),
+        batch_size=48*torch.cuda.device_count(), # Set to 48*GPU_count by default
+        num_workers=6*torch.cuda.device_count(),
+        seed=42,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-4,
+            decay_steps=40_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.ValueFunctionWeightLoader(
+            gemma3_dir="/data/lee/FastWAM_PI_RL/checkpoints/pretrained/gemma3_270m",
+            load_siglip=True,
+        ),
+        ema_decay=None,
+        num_train_steps=40_000, # 10_000 would be enough for 330 episodes
+        log_interval=100,
+        save_interval=2000,
+        keep_period=4000,
+        wandb_enabled=True,
+    ),
+    # 2026-07-31 make_coffee VF config
+    TrainConfig(
+        name="pi06_rl_vf_airbot_make_coffee",
+        model=value_function.ValueFunctionConfig(
+            model_type=_model.ModelType.VALUE_FUNCTION,
+            gemma_variant="gemma_270m",
+            discrete_state_input=True,
+            num_bins=200,
+            return_min=0.0,
+            return_max=1.0,
+            action_horizon=1,
+            action_dim=14,
+        ),
+        data=LeRobotAirbotVFDataConfig(
+            repo_id="make_coffee",
+            base_config=DataConfig(prompt_from_task=True, action_sequence_keys=()),
+            enable_symmetry_aug=False,
+            enable_channel_permutation_aug=True,
+        ),
+        batch_size=48*torch.cuda.device_count(), # Set to 48*GPU_count by default
+        num_workers=6*torch.cuda.device_count(),
+        seed=42,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-4,
+            decay_steps=40_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.ValueFunctionWeightLoader(
+            gemma3_dir="/data/lee/FastWAM_PI_RL/checkpoints/pretrained/gemma3_270m",
             load_siglip=True,
         ),
         ema_decay=None,
@@ -608,10 +786,51 @@ _CONFIGS = [
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         ema_decay=0.99,
-        num_train_steps=300_000,
+        num_train_steps=400_000,
         log_interval=50,
         save_interval=20000,
         keep_period=2000,
+        wandb_enabled=True,
+        fsdp_devices=2,
+    ),
+    # Joint RECAP policy across cloth, box, and coffee. All repositories must be
+    # relabelled by the same joint VF before this config is used.
+    TrainConfig(
+        name="pi06_rl_pretrain_airbot_joint",
+        model=pi0_config.Pi0Config(
+            model_type=_model.ModelType.PI06,
+            action_horizon=50,
+            action_dim=32,
+            discrete_state_input=True,
+        ),
+        data=LeRobotAirbotDataConfig(
+            repo_ids=["fold_clothv3", "box", "make_coffee"],
+            base_config=DataConfig(
+                prompt_from_task=True,
+                task_balance_temperature=2.0,
+            ),
+            extra_delta_transform=False,
+            enable_symmetry_aug=False,
+            enable_channel_permutation_aug=True,
+        ),
+        batch_size=8 * torch.cuda.device_count(),
+        num_workers=6 * torch.cuda.device_count(),
+        seed=42,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=300_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        ema_decay=0.99,
+        num_train_steps=400_000,
+        log_interval=50,
+        save_interval=20_000,
+        keep_period=20_000,
         wandb_enabled=True,
         fsdp_devices=2,
     ),

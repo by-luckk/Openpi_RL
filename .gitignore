@@ -54,6 +54,7 @@ Thumbs.db
 assets/
 logs/
 checkpoints/
+ckpts/
 wandb/
 
 # 大型文件
@@ -70,3 +71,6 @@ debug/
 # 采集数据
 lerobot_data**/**
 mcap_data**/**
+airbot_logs/
+latency_report/
+camera_preview.html
